@@ -1,0 +1,13 @@
+# Local/editor
+.vscode/
+.idea/
+*.swp
+*.tmp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Build artefacts
+build/
+dist/
