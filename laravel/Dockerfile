@@ -53,24 +53,14 @@ RUN set -eux; \
         --with-webp; \
     docker-php-ext-install -j"$(nproc)" \
         bcmath \
-        curl \
-        dom \
         exif \
         gd \
         intl \
-        mbstring \
         mysqli \
-        opcache \
         pcntl \
         pdo_mysql \
         pdo_pgsql \
-        pdo_sqlite \
-        simplexml \
         sockets \
-        sqlite3 \
-        xml \
-        xmlreader \
-        xmlwriter \
         zip; \
     yes '' | pecl install imagick; \
     yes '' | pecl install redis; \
