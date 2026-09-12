@@ -1,0 +1,251 @@
+name: Build Laravel CI image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'laravel/**'
+      - '.github/workflows/build-laravel-ci.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/seceab/laravel-ci
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - boris-ci
+
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Build and push Laravel CI image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: ./laravel
+          file: ./laravel/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:php85-node24
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  smoke:
+    name: Runtime smoke test
+    needs:
+      - build
+
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - boris-ci
+
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      packages: read
+
+    container:
+      image: ghcr.io/seceab/laravel-ci:sha-${{ github.sha }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    services:
+      mariadb:
+        image: mariadb:12.3
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: ci
+          MARIADB_USER: ci
+          MARIADB_PASSWORD: ci
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+
+      redis:
+        image: redis:8-alpine
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+
+    steps:
+      - name: Versions
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          php --version
+          composer --version
+          node --version
+          npm --version
+          sqlite3 --version
+          git --version
+          git lfs version
+
+      - name: Required PHP extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          php -r '
+          $required = [
+              "bcmath",
+              "curl",
+              "dom",
+              "exif",
+              "gd",
+              "imagick",
+              "intl",
+              "mbstring",
+              "mysqli",
+              "pcntl",
+              "pdo_mysql",
+              "pdo_pgsql",
+              "pdo_sqlite",
+              "redis",
+              "simplexml",
+              "sockets",
+              "sqlite3",
+              "xml",
+              "xmlreader",
+              "xmlwriter",
+              "zip",
+              "sodium"
+          ];
+
+          $missing = [];
+
+          foreach ($required as $extension) {
+              if (!extension_loaded($extension)) {
+                  $missing[] = $extension;
+              }
+          }
+
+          if ($missing) {
+              fwrite(
+                  STDERR,
+                  "Missing PHP extensions: " .
+                  implode(", ", $missing) .
+                  PHP_EOL
+              );
+              exit(1);
+          }
+
+          echo "Required PHP extensions: OK", PHP_EOL;
+          '
+
+          php -r '
+          if (!extension_loaded("Zend OPcache")) {
+              fwrite(STDERR, "Zend OPcache missing\n");
+              exit(1);
+          }
+
+          echo "Zend OPcache: OK\n";
+          '
+
+      - name: SQLite smoke test
+        shell: bash
+        run: |
+          php -r '
+          $pdo = new PDO(
+              "sqlite::memory:",
+              null,
+              null,
+              [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+          );
+
+          $pdo->exec(
+              "CREATE TABLE smoke (
+                  id INTEGER PRIMARY KEY,
+                  value TEXT NOT NULL
+              )"
+          );
+
+          $pdo->exec(
+              "INSERT INTO smoke (value) VALUES (\"boris\")"
+          );
+
+          $value = $pdo
+              ->query("SELECT value FROM smoke")
+              ->fetchColumn();
+
+          if ($value !== "boris") {
+              throw new RuntimeException("SQLite smoke test failed");
+          }
+
+          echo "SQLite: OK\n";
+          '
+
+      - name: MariaDB smoke test
+        shell: bash
+        run: |
+          php -r '
+          $pdo = new PDO(
+              "mysql:host=mariadb;port=3306;dbname=ci;charset=utf8mb4",
+              "ci",
+              "ci",
+              [
+                  PDO::ATTR_ERRMODE =>
+                      PDO::ERRMODE_EXCEPTION
+              ]
+          );
+
+          $version = $pdo
+              ->query("SELECT VERSION()")
+              ->fetchColumn();
+
+          echo "MariaDB: ", $version, PHP_EOL;
+          '
+
+      - name: Redis smoke test
+        shell: bash
+        run: |
+          php -r '
+          $redis = new Redis();
+
+          $redis->connect("redis", 6379, 5);
+
+          $redis->set("boris-ci-smoke", "ok");
+
+          if ($redis->get("boris-ci-smoke") !== "ok") {
+              throw new RuntimeException(
+                  "Redis smoke test failed"
+              );
+          }
+
+          echo "Redis: OK\n";
+          '
